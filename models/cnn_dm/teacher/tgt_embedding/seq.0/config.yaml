@@ -1,0 +1,3 @@
+!torch.Embedding
+num_embeddings: 30522
+embedding_dim: 512

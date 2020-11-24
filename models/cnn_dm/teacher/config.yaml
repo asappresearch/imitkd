@@ -1,0 +1,39 @@
+!generation.Seq2Seq
+src_embedding: !generation.Sequential
+  embedding: !torch.Embedding
+    num_embeddings: 30522
+    embedding_dim: 512
+  positional: !generation.PositionalEncoding
+    d_model: 512
+    max_len: 5000
+tgt_embedding: !generation.Sequential
+  embedding: !torch.Embedding
+    num_embeddings: 30522
+    embedding_dim: 512
+  positional: !generation.PositionalEncoding
+    d_model: 512
+    max_len: 5000
+embedding_dropout: 0.1
+encoder: !generation.TransformerEncoder
+  input_size: 512
+  d_model: 512
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.1
+decoder: !generation.TransformerDecoder
+  input_size: 512
+  d_model: 512
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.1
+output_layer: !torch.Linear
+  in_features: 512
+  out_features: 30522
+dropout: 0.1
+weight_tying:
+  output_layer: tgt_embedding.embedding
+  src_embedding.embedding: tgt_embedding.embedding
+src_padding_idx: 0
+tgt_padding_idx: 0
