@@ -1,0 +1,120 @@
+generation: .
+
+---
+!Experiment
+
+name: cnn-dm-vanilla
+
+resources:
+  data: /Users/alexanderlin/Desktop/imitkd/data/cnn_dm/cnn_dm.zip
+  teacher: /Users/alexanderlin/Desktop/imitkd/models/cnn_dm/teacher
+
+pipeline:
+
+  train: !generation.Seq2SeqDistillTrainer
+    dataset: !generation.CNNDMDataset
+      file: !@ data
+      transform:
+        src: !generation.PretrainedBertTextField
+          max_seq_len: 400
+        tgt: !generation.PretrainedBertLMField
+          max_seq_len: 100
+      cache: True
+    model: !generation.Seq2Seq
+      src_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].src.vocab_size
+        embedding_dim: 256
+      tgt_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].tgt.vocab_size
+        embedding_dim: 256
+      embedding_dropout: 0.1
+      encoder: !generation.RNNEncoder
+        input_size: !@ train[model][src_embedding][embedding_dim]
+        n_layers: 2
+        hidden_size: 512
+        rnn_type: 'sru'
+        dropout: !@ train[model][embedding_dropout]
+        bidirectional: True
+        projection_size: 256
+      decoder: !generation.RNNDecoder
+        input_size: !@ train[model][tgt_embedding][embedding_dim]
+        n_layers: !@ train[model][encoder][n_layers]
+        hidden_size: 1024
+        rnn_type: !@ train[model][encoder][rnn_type]
+        dropout: !@ train[model][encoder][dropout]
+        attention: !generation.DotProductAttention
+        activation: !torch.Tanh
+        projection_size: 256
+      output_layer: !generation.Sequential
+        proj: !torch.Linear
+          in_features: !@ train[model][decoder][hidden_size]
+          out_features: !@ train[model][tgt_embedding][embedding_dim]
+        final: !torch.Linear
+          in_features: !@ train[model][output_layer][proj][out_features]
+          out_features: !@ train[dataset].tgt.vocab_size
+      dropout: !@ train[model][embedding_dropout]
+      weight_tying:
+        output_layer.final: tgt_embedding
+        src_embedding: tgt_embedding
+    translator: !generation.GreedyTranslator
+      tgt_sos_idx: !@ train[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ train[dataset].tgt.eos_idx
+      max_seq_len: 99
+    train_sampler: !BaseSampler
+      pad_index: !@ train[dataset].tgt.pad_idx
+      batch_size: 32
+      drop_last: True
+    val_sampler: !BaseSampler
+      pad_index: !@ train[dataset].tgt.pad_idx
+      batch_size: 128
+      drop_last: False
+    loss_fn: !generation.LabelSmoothingLoss
+      alpha: 0.1
+      tgt_vocab_size: !@ train[dataset].tgt.vocab_size
+      ignore_index: !@ train[dataset].tgt.pad_idx
+    metric_fn: !Perplexity
+    optimizer: !torch.Adam
+      lr: 1e-1
+      params: !@ train[model].trainable_params
+    max_steps: 100
+    iter_per_step: 2000
+    batches_per_iter: 1
+    batches_per_samp: 4
+    bleu_fn: !generation.Rouge
+      tokenizer: !@ train[dataset].tgt._tokenizer
+    iter_scheduler: !NoamScheduler
+      optimizer: !@ train[optimizer]
+      warmup: 2000
+      d_model: 1
+    max_grad_norm: 5
+    teacher: !generation.Seq2Seq.load_from_path
+      path: !@ teacher
+    scheduler_type: 'ones'
+    eval_translator: !generation.GreedyTranslator
+      tgt_sos_idx: !@ train[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ train[dataset].tgt.eos_idx
+      max_seq_len: 128
+
+  eval_runner: !Evaluator
+    dataset: !generation.CNNDMDataset
+      file: !@ data
+      transform:
+        src: !generation.PretrainedBertTextField
+          max_seq_len: 400
+        tgt: !generation.PretrainedBertTextField
+          max_seq_len: 100
+      cache: True
+    model: !generation.BeamSearchTranslator
+      model: !@ train[model]
+      tgt_sos_idx: !@ eval_runner[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ eval_runner[dataset].tgt.eos_idx
+      max_seq_len: 128
+      beam_size: 5
+    metric_fn: !generation.Rouge
+      tokenizer: !@ eval_runner[dataset].tgt._tokenizer
+      n: !g [1, 2]
+    eval_data: 'test'
+    eval_sampler: !BaseSampler
+      batch_size: 128
+      drop_last: False
+      pad_index: !@ eval_runner[dataset].tgt.pad_idx

@@ -1,0 +1,11 @@
+Metadata-Version: 1.2
+Name: imitkd
+Version: 1.0.0
+Summary: Pytorch based library for knowledge distillation of autoregressive models.
+Home-page: UNKNOWN
+Author: Alexander Lin, ASAPP Inc.
+Author-email: alin5250@gmail.com
+License: UNKNOWN
+Description: UNKNOWN
+Platform: UNKNOWN
+Requires-Python: >=3.6.1

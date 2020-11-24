@@ -1,0 +1,127 @@
+generation: .
+
+---
+!Experiment
+
+name: wmt-vanilla-less-data
+
+resources:
+  data: /Users/alexanderlin/Desktop/imitkd/data/wmt/wmt16_en_de.tar.gz
+
+pipeline:
+
+  train: !generation.Seq2SeqDistillTrainer
+    dataset: !generation.WMT16Dataset
+      file: !@ data
+      use_bpe_tokenized: True
+      transform:
+        src: !generation.PretrainedFairseqTextField
+          alias: 'transformer.wmt16.en-de'
+          use_tgt_dict: False
+        tgt: !generation.PretrainedFairseqLMField
+          alias: 'transformer.wmt16.en-de'
+          use_tgt_dict: True
+      cache: True
+    model: !generation.Seq2Seq
+      src_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].src.vocab_size
+        embedding_dim: 256
+      tgt_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].tgt.vocab_size
+        embedding_dim: !@ train[model][src_embedding][embedding_dim]
+      embedding_dropout: 0.1
+      encoder: !generation.RNNEncoder
+        input_size: !@ train[model][src_embedding][embedding_dim]
+        n_layers: 4
+        hidden_size: 1024
+        projection_size: 256
+        rnn_type: 'sru'
+        dropout: !@ train[model][embedding_dropout]
+        bidirectional: True
+        layer_norm: True
+      decoder: !generation.RNNDecoder
+        input_size: !@ train[model][tgt_embedding][embedding_dim]
+        n_layers: !@ train[model][encoder][n_layers]
+        hidden_size: 2048
+        projection_size: !@ train[model][encoder][projection_size]
+        rnn_type: !@ train[model][encoder][rnn_type]
+        dropout: !@ train[model][encoder][dropout]
+        attention: !generation.DotProductAttention
+        activation: !torch.Tanh
+        layer_norm: True
+      output_layer: !generation.Sequential
+        proj: !torch.Linear
+          in_features: !@ train[model][decoder][hidden_size]
+          out_features: !@ train[model][decoder][projection_size]
+        final: !torch.Linear
+          in_features: !@ train[model][output_layer][proj][out_features]
+          out_features: !@ train[dataset].tgt.vocab_size
+      dropout: !@ train[model][embedding_dropout]
+      weight_tying:
+        output_layer.final: tgt_embedding
+        src_embedding: tgt_embedding
+      src_padding_idx: !@ train[dataset].src.pad_idx
+      tgt_padding_idx: !@ train[dataset].tgt.pad_idx
+    translator: !generation.GreedyTranslator
+      tgt_sos_idx: !@ train[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ train[dataset].tgt.eos_idx
+      max_seq_len: 100
+    train_sampler: !generation.BaseSamplerWithFilter
+      pad_index: !@ train[dataset].tgt.pad_idx
+      max_seq_len: 100
+      batch_size: 128
+      drop_last: True
+      downsample: 0.04 # Note the downsampling of data here
+      seed: 1111
+    val_sampler: !generation.BaseSamplerWithFilter
+      pad_index: !@ train[dataset].tgt.pad_idx
+      max_seq_len: 100
+      batch_size: 128
+      drop_last: False
+    loss_fn: !torch.CrossEntropyLoss
+    metric_fn: !Perplexity
+    optimizer: !torch.Adam
+      lr: 5e-2
+      params: !@ train[model].trainable_params
+    max_steps: 60
+    epoch_per_step: 0.25
+    batches_per_iter: 1
+    batches_per_samp: 1
+    lower_is_better: True
+    max_grad_norm: 2
+    bleu_fn: !generation.Bleu
+      vocab: !@ train[dataset].tgt.vocab
+      specials: ['<pad>', '</s>']
+    iter_scheduler: !NoamScheduler
+      optimizer: !@ train[optimizer]
+      warmup: 4000
+      d_model: 1
+    teacher: !generation.PretrainedFairseqSeq2Seq
+      alias: 'transformer.wmt16.en-de'
+    scheduler_type: 'ones'
+
+  eval: !Evaluator
+    dataset: !generation.WMT16Dataset
+      file: !@ data
+      use_bpe_tokenized: True
+      transform:
+        src: !generation.PretrainedFairseqTextField
+          alias: 'transformer.wmt16.en-de'
+          use_tgt_dict: False
+        tgt: !generation.PretrainedFairseqTextField
+          alias: 'transformer.wmt16.en-de'
+          use_tgt_dict: True
+    model: !generation.BeamSearchTranslator
+      model: !@ train[model]
+      tgt_sos_idx: !@ eval[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ eval[dataset].tgt.eos_idx
+      max_seq_len: 100
+      beam_size: !g [1, 5]
+    metric_fn: !generation.Bleu
+      vocab: !@ eval[dataset].tgt.vocab
+      specials: ['<pad>', '</s>']
+    eval_data: 'test'
+    eval_sampler: !BaseSampler
+      batch_size: 128
+      drop_last: False
+      pad_index: !@ eval[dataset].tgt.pad_idx

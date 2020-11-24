@@ -1,0 +1,7 @@
+!generation.Sequential
+embedding: !torch.Embedding
+  num_embeddings: 8836
+  embedding_dim: 256
+positional: !generation.PositionalEncoding
+  d_model: 256
+  max_len: 5000

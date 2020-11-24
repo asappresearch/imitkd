@@ -1,0 +1,163 @@
+generation: .
+
+---
+!Experiment
+
+name: iwslt-seqkd-rnn
+
+resources:
+  base_dir: /Users/alexanderlin/Desktop/imitkd/data/iwslt/seqkd_dir
+  codes_path: /Users/alexanderlin/Desktop/imitkd/data/iwslt/codes.txt
+  teacher: /Users/alexanderlin/Desktop/imitkd/models/iwslt/teacher
+
+pipeline:
+
+  seqKD: !generation.SeqKDRunner # Generate dataset with teacher
+    dataset: !generation.IWSLTDataset
+      src: 'de'
+      tgt: 'en'
+      year: '2014'
+      val_frac_from_train: 0.04
+      seed: 1234
+      val_files: []
+      test_files: ['dev2010', 'tst2010', 'tst2011', 'tst2012']
+      cache: False
+      transform:
+        src: !TextField
+          tokenizer: !generation.BPETokenizer
+            codes_path: !@ codes_path
+            nltk_tokenize_first: True
+          lower: True
+        tgt: !LMField
+          tokenizer: !generation.BPETokenizer
+            codes_path: !@ codes_path
+            nltk_tokenize_first: True
+          lower: True
+          sos_token: '<SOS>'
+          eos_token: '<EOS>'
+    sampler: !generation.BaseSamplerWithFilter
+      max_seq_len: 125
+      batch_size: 128
+      drop_last: False
+    translator: !generation.BeamSearchTranslator
+      model: !generation.Seq2Seq.load_from_path
+        path: !@ teacher
+      tgt_sos_idx: 2
+      tgt_eos_idx: 3
+      max_seq_len: 126
+      beam_size: 5
+    base_dir: !@ base_dir
+    train_file: 'train_file.p'
+    val_file: 'val_file.p'
+    test_file: 'test_file.p'
+    others_file: 'others_file.p'
+    split: 'train'
+
+  train: !generation.Seq2SeqTrainer # Train student on teacher-generated dataset
+    dataset: !generation.TensorDataset
+      base_dir: !@ base_dir
+      train_file: 'train_file.p'
+      val_file: 'val_file.p'
+      test_file: 'test_file.p'
+      others_file: 'others_file.p'
+      columns: ['src', 'tgt_context', 'tgt_words']
+    model: !generation.Seq2Seq
+      src_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].src_vocab_size
+        embedding_dim: 256
+      tgt_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].tgt_vocab_size
+        embedding_dim: !@ train[model][src_embedding][embedding_dim]
+      embedding_dropout: 0.1
+      encoder: !generation.RNNEncoder
+        input_size: !@ train[model][src_embedding][embedding_dim]
+        n_layers: 2
+        hidden_size: 256
+        rnn_type: 'sru'
+        dropout: !@ train[model][embedding_dropout]
+        bidirectional: True
+      decoder: !generation.RNNDecoder
+        input_size: !@ train[model][tgt_embedding][embedding_dim]
+        n_layers: !@ train[model][encoder][n_layers]
+        hidden_size: 512
+        rnn_type: !@ train[model][encoder][rnn_type]
+        dropout: !@ train[model][encoder][dropout]
+        attention: !generation.DotProductAttention
+        activation: !torch.Tanh
+      output_layer: !generation.Sequential
+        proj: !torch.Linear
+          in_features: !@ train[model][decoder][hidden_size]
+          out_features: !@ train[model][tgt_embedding][embedding_dim]
+        final: !torch.Linear
+          in_features: !@ train[model][output_layer][proj][out_features]
+          out_features: !@ train[dataset].tgt_vocab_size
+      dropout: !@ train[model][embedding_dropout]
+      weight_tying:
+        output_layer.final: tgt_embedding
+    translator: !generation.GreedyTranslator
+      tgt_sos_idx: 2
+      tgt_eos_idx: 3
+      max_seq_len: 125
+    train_sampler: !generation.BaseSamplerWithFilter
+      max_seq_len: 125
+      batch_size: 128
+      drop_last: True
+    val_sampler: !generation.BaseSamplerWithFilter
+      max_seq_len: 125
+      batch_size: 128
+      drop_last: True
+    loss_fn: !torch.CrossEntropyLoss
+    metric_fn: !Perplexity
+    optimizer: !torch.Adam
+      lr: 1e-1
+      params: !@ train[model].trainable_params
+    lower_is_better: True
+    max_grad_norm: 5
+    bleu_fn: !generation.Bleu
+      vocab: !@ train[dataset].tgt.vocab
+      specials: ['<pad>', '<SOS>', '<EOS>']
+    batches_per_iter: 1
+    iter_per_step: 1000
+    iter_scheduler: !NoamScheduler
+      optimizer: !@ train[optimizer]
+      warmup: 5000
+      d_model: 1
+    max_steps: 80
+
+  eval: !Evaluator # Evaluate student model
+    dataset: !generation.IWSLTDataset
+      src: 'de'
+      tgt: 'en'
+      year: '2014'
+      val_frac_from_train: 0.04
+      seed: 1234
+      val_files: []
+      test_files: ['dev2010', 'tst2010', 'tst2011', 'tst2012']
+      cache: False
+      transform:
+        src: !TextField
+          tokenizer: !generation.BPETokenizer
+            codes_path: !@ codes_path
+            nltk_tokenize_first: True
+          lower: True
+        tgt: !TextField
+          tokenizer: !generation.BPETokenizer
+            codes_path: !@ codes_path
+            nltk_tokenize_first: True
+          lower: True
+          sos_token: '<SOS>'
+          eos_token: '<EOS>'
+    model: !generation.BeamSearchTranslator
+      model: !@ train[model]
+      tgt_sos_idx: 2
+      tgt_eos_idx: 3
+      max_seq_len: 125
+      beam_size: !g [1, 5]
+    metric_fn: !generation.Bleu
+      vocab: !@ eval[dataset].tgt.vocab
+      specials: ['<pad>', '<SOS>', '<EOS>']
+    eval_data: 'test'
+    eval_sampler: !generation.BaseSamplerWithFilter
+      max_seq_len: 125
+      batch_size: 32
+      drop_last: False

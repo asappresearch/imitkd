@@ -1,0 +1,7 @@
+!generation.TransformerDecoder
+input_size: 256
+d_model: 256
+nhead: 4
+num_layers: 8
+dim_feedforward: 1024
+dropout: 0.1

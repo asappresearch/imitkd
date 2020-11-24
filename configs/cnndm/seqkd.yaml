@@ -1,0 +1,146 @@
+generation: .
+
+---
+!Experiment
+
+name: cnn-dm-seqkd
+
+resources:
+  base_dir: /Users/alexanderlin/Desktop/imitkd/data/cnn_dm/seqkd_dir
+  data: /Users/alexanderlin/Desktop/imitkd/data/cnn_dm/cnn_dm.zip
+  teacher: /Users/alexanderlin/Desktop/imitkd/models/cnn_dm/teacher
+
+pipeline:
+
+  seqKD: !generation.SeqKDRunner
+    dataset: !generation.CNNDMDataset
+      file: !@ data
+      transform:
+        src: !generation.PretrainedBertTextField
+          max_seq_len: 400
+        tgt: !generation.PretrainedBertTextField
+          max_seq_len: 100
+    sampler: !generation.BaseSamplerWithFilter
+      max_seq_len: 101
+      batch_size: 256
+      drop_last: False
+      pad_index: !@ seqKD[dataset].tgt.pad_idx
+    translator: !generation.PretrainedFairseqSeq2SeqTranslator
+      alias: 'transformer.wmt16.en-de'
+      tgt_sos_idx: !@ seqKD[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ seqKD[dataset].tgt.eos_idx
+      max_seq_len: 100
+      beam_size: 5
+    base_dir: !@ base_dir
+    train_file: 'train_file.p'
+    val_file: 'val_file.p'
+    test_file: 'test_file.p'
+    others_file: 'others_file.p'
+    batch_saving: 2000
+
+  train: !generation.Seq2SeqDistillTrainer
+    dataset: !generation.TensorDataset
+      base_dir: !@ base_dir
+      train_file: ['0train_file.p', '1train_file.p', '2train_file.p', '3train_file.p', '4train_file.p', '5train_file.p', '6train_file.p', '7train_file.p', '8train_file.p']
+      val_file: 'val_file.p'
+      test_file: 'test_file.p'
+      others_file: 'others_file.p'
+      columns: ['src', 'tgt_context', 'tgt_words']
+    model: !generation.Seq2Seq
+      src_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].src_vocab_size
+        embedding_dim: 256
+      tgt_embedding: !torch.Embedding
+        num_embeddings: !@ train[dataset].tgt_vocab_size
+        embedding_dim: 256
+      embedding_dropout: 0.1
+      encoder: !generation.RNNEncoder
+        input_size: !@ train[model][src_embedding][embedding_dim]
+        n_layers: 2
+        hidden_size: 512
+        rnn_type: 'sru'
+        dropout: !@ train[model][embedding_dropout]
+        bidirectional: True
+        projection_size: 256
+      decoder: !generation.RNNDecoder
+        input_size: !@ train[model][tgt_embedding][embedding_dim]
+        n_layers: !@ train[model][encoder][n_layers]
+        hidden_size: 1024
+        rnn_type: !@ train[model][encoder][rnn_type]
+        dropout: !@ train[model][encoder][dropout]
+        attention: !generation.DotProductAttention
+        activation: !torch.Tanh
+        projection_size: 256
+      output_layer: !generation.Sequential
+        proj: !torch.Linear
+          in_features: !@ train[model][decoder][hidden_size]
+          out_features: !@ train[model][tgt_embedding][embedding_dim]
+        final: !torch.Linear
+          in_features: !@ train[model][output_layer][proj][out_features]
+          out_features: !@ train[dataset].tgt_vocab_size
+      dropout: !@ train[model][embedding_dropout]
+      weight_tying:
+        output_layer.final: tgt_embedding
+        src_embedding: tgt_embedding
+    translator: !generation.GreedyTranslator
+      tgt_sos_idx: 101
+      tgt_eos_idx: 102
+      max_seq_len: 99
+    train_sampler: !BaseSampler
+      pad_index: 0
+      batch_size: 32
+      drop_last: True
+    val_sampler: !BaseSampler
+      pad_index: 0
+      batch_size: 128
+      drop_last: False
+    loss_fn: !generation.LabelSmoothingLoss
+      alpha: 0.1
+      tgt_vocab_size: !@ train[dataset].tgt_vocab_size
+      ignore_index: 0
+    metric_fn: !Perplexity
+    optimizer: !torch.Adam
+      lr: 1e-1
+      params: !@ train[model].trainable_params
+    max_steps: 100
+    iter_per_step: 2000
+    batches_per_iter: 1
+    batches_per_samp: 4
+    bleu_fn: !generation.Rouge
+      tokenizer: !@ seqKD[dataset].tgt._tokenizer
+    iter_scheduler: !NoamScheduler
+      optimizer: !@ train[optimizer]
+      warmup: 2000
+      d_model: 1
+    max_grad_norm: 5
+    teacher: !generation.Seq2Seq.load_from_path
+      path: !@ teacher
+    scheduler_type: 'ones'
+    eval_translator: !generation.GreedyTranslator
+      tgt_sos_idx: 101
+      tgt_eos_idx: 102
+      max_seq_len: 128
+
+  eval_runner: !Evaluator
+    dataset: !generation.CNNDMDataset
+      file: !@ data
+      transform:
+        src: !generation.PretrainedBertTextField
+          max_seq_len: 400
+        tgt: !generation.PretrainedBertTextField
+          max_seq_len: 100
+      cache: True
+    model: !generation.BeamSearchTranslator
+      model: !@ train[model]
+      tgt_sos_idx: !@ eval_runner[dataset].tgt.sos_idx
+      tgt_eos_idx: !@ eval_runner[dataset].tgt.eos_idx
+      max_seq_len: 128
+      beam_size: 5
+    metric_fn: !generation.Rouge
+      tokenizer: !@ eval_runner[dataset].tgt._tokenizer
+      n: !g [1, 2]
+    eval_data: 'test'
+    eval_sampler: !BaseSampler
+      batch_size: 128
+      drop_last: False
+      pad_index: !@ eval_runner[dataset].tgt.pad_idx
